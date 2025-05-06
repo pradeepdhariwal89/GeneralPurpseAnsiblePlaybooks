@@ -58,7 +58,7 @@ Here's a breakdown of the available tasks and their intended purpose:
 
 2.  **Configure Inventory:** The `inventory` file defines the target hosts where Ansible will execute the playbooks.  Modify this file to include the IP addresses or hostnames of your servers.
 
-3.  **Update playbook variables:** playbook.yaml contains essential variables with default values, modify these to reflect values relevant to your environment.
+3.  **Update playbook variables:** The `playbook.yaml` contains essential variables with default values, modify these to reflect values relevant to your environment.
 
 4.  **Run the Playbook:** Execute the playbook using the following command:
 
