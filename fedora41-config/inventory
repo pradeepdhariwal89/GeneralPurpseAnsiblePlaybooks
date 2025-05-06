@@ -1,0 +1,2 @@
+[fedora-server]
+fedora-base ansible_user=admin

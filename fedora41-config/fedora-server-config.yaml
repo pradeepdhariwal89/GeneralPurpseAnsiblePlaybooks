@@ -1,0 +1,143 @@
+---
+# Fedora 41 Server Configuration Playbook
+# This playbook installs Golang, sqlc, Podman and configures networking
+
+- name: Configure Fedora 41 server
+  hosts: fedora-server
+  become: yes
+  vars:
+    # Network configuration
+    new_hostname: "devserver-f41"  # Replace with your desired hostname
+    new_ip: "192.168.1.100"        # Replace with your desired IP
+    network_interface: "eth0"      # Replace with your network interface name
+    network_gateway: "192.168.1.1" # Replace with your network gateway
+    network_dns:
+      - "8.8.8.8"
+      - "8.8.4.4"
+    
+    # Software versions
+    golang_version: "1.23.0"       # Specify your Go version
+    
+  tasks:
+    # Update system packages
+    - name: Update dnf cache
+      dnf:
+        update_cache: yes
+    
+    - name: Upgrade all packages
+      dnf:
+        name: "*"
+        state: latest
+
+    # Change hostname
+    - name: Set new hostname
+      hostname:
+        name: "{{ new_hostname }}"
+      
+    - name: Update /etc/hosts file with new hostname
+      lineinfile:
+        path: /etc/hosts
+        regexp: '^127.0.1.1'
+        line: '127.0.1.1 {{ new_hostname }}'
+        state: present
+    
+    # Configure static IP
+    - name: Configure network connection with static IP
+      copy:
+        dest: /etc/NetworkManager/system-connections/{{ network_interface }}.nmconnection
+        content: |
+          [connection]
+          id={{ network_interface }}
+          type=ethernet
+          interface-name={{ network_interface }}
+          autoconnect=true
+
+          [ethernet]
+          mac-address-blacklist=
+
+          [ipv4]
+          method=manual
+          addresses={{ new_ip }}/24
+          gateway={{ network_gateway }}
+          dns={{ network_dns | join(';') }}
+          
+          [ipv6]
+          method=auto
+        mode: 0600
+      register: network_config
+    
+    - name: Restart NetworkManager service
+      systemd:
+        name: NetworkManager
+        state: restarted
+      when: network_config.changed
+    
+    # Install Podman
+    - name: Install Podman
+      dnf:
+        name: podman
+        state: present
+    
+    # Install Go
+    - name: Download Go
+      get_url:
+        url: "https://golang.org/dl/go{{ golang_version }}.linux-amd64.tar.gz"
+        dest: "/tmp/go{{ golang_version }}.linux-amd64.tar.gz"
+        mode: 0644
+    
+    - name: Remove any existing Go installation
+      file:
+        path: /usr/local/go
+        state: absent
+    
+    - name: Extract Go
+      unarchive:
+        src: "/tmp/go{{ golang_version }}.linux-amd64.tar.gz"
+        dest: /usr/local
+        remote_src: yes
+    
+    - name: Set up Go environment variables
+      copy:
+        dest: /etc/profile.d/go.sh
+        content: |
+          export GOPATH=$HOME/go
+          export PATH=$PATH:/usr/local/go/bin:$GOPATH/bin
+        mode: 0644
+    
+    - name: Create GOPATH directory
+      file:
+        path: "/home/{{ ansible_user }}/go"
+        state: directory
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+        mode: 0755
+      become_user: "{{ ansible_user }}"
+    
+    # Install sqlc
+    - name: Install git (required for go get)
+      dnf:
+        name: git
+        state: present
+    
+    - name: Install gcc and other build essentials
+      dnf:
+        name:
+          - gcc
+          - gcc-c++
+          - make
+        state: present
+    
+    - name: Install sqlc via go install
+      shell: |
+        source /etc/profile.d/go.sh
+        go install github.com/sqlc-dev/sqlc/cmd/sqlc@latest
+      args:
+        executable: /bin/bash
+      become_user: "{{ ansible_user }}"
+    
+    # Final system restart
+    - name: Restart system to apply all changes
+      reboot:
+        reboot_timeout: 300
+        post_reboot_delay: 30
+      when: network_config.changed

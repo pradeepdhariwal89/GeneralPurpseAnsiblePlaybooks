@@ -1,0 +1,176 @@
+---
+# install_neovim.yml
+# Ansible playbook to install Neovim from source on Fedora 41 with Kickstart configuration
+
+- name: Install Neovim from source on Fedora 41 with Kickstart
+  hosts: all
+  become: true
+  vars:
+    neovim_version: master
+    build_dir: "/tmp/neovim-build"
+    install_prefix: "/usr/local"
+    # User variables - adjust as needed
+    user_name: "admin"
+    user_home: "/home/{{ user_name }}"
+    config_dir: "{{ user_home }}/.config/nvim"
+
+  tasks:
+    - name: Install required packages for building Neovim
+      dnf:
+        name:
+          - git
+          - make
+          - cmake
+          - gcc
+          - gcc-c++
+          - gettext
+          - unzip
+          - curl
+          - automake
+          - pkgconfig
+          - libtool
+          - ninja-build
+          - python3-pip
+        state: present
+        update_cache: yes
+
+    - name: Install required development packages
+      dnf:
+        name:
+          - libtool-ltdl-devel
+          - lua-devel
+          - luajit-devel
+          - lua5.1-devel
+          - libuv-devel
+          - unibilium-devel
+          - msgpack-devel
+          - libtermkey-devel
+          - libvterm-devel
+          - gperf
+        state: present
+
+    - name: Create build directory
+      file:
+        path: "{{ build_dir }}"
+        state: directory
+        mode: '0755'
+
+    - name: Clone Neovim repository
+      git:
+        repo: https://github.com/neovim/neovim.git
+        dest: "{{ build_dir }}"
+        version: "{{ neovim_version }}"
+        depth: 1
+
+    - name: Build Neovim
+      shell: |
+        cd {{ build_dir }}
+        make CMAKE_BUILD_TYPE=Release
+      args:
+        executable: /bin/bash
+
+    - name: Install Neovim
+      shell: |
+        cd {{ build_dir }}
+        make install
+      args:
+        executable: /bin/bash
+
+    - name: Verify Neovim installation
+      command: nvim --version
+      register: nvim_version
+      changed_when: false
+
+    - name: Show Neovim version
+      debug:
+        var: nvim_version.stdout_lines
+
+    - name: Install Python support for Neovim
+      pip:
+        name: pynvim
+        state: latest
+
+    - name: Clean up build directory
+      file:
+        path: "{{ build_dir }}"
+        state: absent
+      when: ansible_check_mode is not defined or not ansible_check_mode
+
+    # Kickstart configuration setup
+    - name: Create Neovim config directory
+      file:
+        path: "{{ config_dir }}"
+        state: directory
+        owner: "{{ user_name }}"
+        group: "{{ user_name }}"
+        mode: '0755'
+      become: true
+      become_user: "{{ user_name }}"
+
+    - name: Install git (required for Kickstart)
+      dnf:
+        name: git
+        state: present
+      when: not ansible_check_mode
+
+    - name: Install additional dependencies for plugins
+      dnf:
+        name:
+          - ripgrep
+          - fd-find
+          - nodejs
+          - npm
+        state: present
+      when: not ansible_check_mode
+
+    - name: Download Kickstart configuration (init.lua)
+      get_url:
+        url: https://raw.githubusercontent.com/nvim-lua/kickstart.nvim/master/init.lua
+        dest: "{{ config_dir }}/init.lua"
+        owner: "{{ user_name }}"
+        group: "{{ user_name }}"
+        mode: '0644'
+      become: true
+      become_user: "{{ user_name }}"
+
+    - name: Create lua directory for additional configuration
+      file:
+        path: "{{ config_dir }}/lua/custom"
+        state: directory
+        owner: "{{ user_name }}"
+        group: "{{ user_name }}"
+        mode: '0755'
+      become: true
+      become_user: "{{ user_name }}"
+
+    - name: Create basic custom configuration file
+      copy:
+        dest: "{{ config_dir }}/lua/custom/init.lua"
+        content: |
+          -- Custom Neovim configuration
+          return {
+            -- Add your custom configurations here
+            -- Example:
+            -- Set colorscheme
+            colorscheme = function()
+              vim.cmd('colorscheme habamax')
+            end,
+            
+            -- Custom options
+            options = function()
+              vim.opt.relativenumber = true
+              vim.opt.scrolloff = 8
+            end,
+          }
+        owner: "{{ user_name }}"
+        group: "{{ user_name }}"
+        mode: '0644'
+      become: true
+      become_user: "{{ user_name }}"
+
+    - name: First-time setup message
+      debug:
+        msg:
+          - "Neovim with Kickstart has been installed!"
+          - "The first time you open Neovim, it will automatically install plugins."
+          - "This may take a few minutes - please be patient during the first launch."
