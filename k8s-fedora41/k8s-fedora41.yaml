@@ -1,0 +1,240 @@
+---
+# kubernetes-fedora.yml
+# Ansible playbook to install and configure Kubernetes on Fedora 41
+# This playbook assumes you're running it against a Fedora 41 server
+
+- name: Install and configure Kubernetes on Fedora 41
+  hosts: k8s_servers
+  become: true
+  vars:
+    kubernetes_version: "1.28.0"
+    pod_network_cidr: "10.244.0.0/16"
+    selinux_state: permissive
+    firewalld_state: stopped
+    swap_state: disabled
+    
+  tasks:
+    # ==================== PREREQUISITES ====================
+    - name: Update all packages
+      dnf:
+        name: "*"
+        state: latest
+        update_cache: yes
+      
+    - name: Install required packages
+      dnf:
+        name:
+          - iproute-tc
+          - curl
+          - wget
+          - git
+          - vim
+          - bash-completion
+          - policycoreutils-python-utils
+          - container-selinux
+          - conntrack-tools
+          - socat
+        state: present
+    
+    # ==================== SYSTEM CONFIGURATION ====================
+    - name: Set SELinux to {{ selinux_state }}
+      selinux:
+        policy: targeted
+        state: "{{ selinux_state }}"
+      register: selinux_change
+      
+    - name: Disable swap
+      command: swapoff -a
+      when: swap_state == "disabled"
+      
+    - name: Disable swap in fstab
+      replace:
+        path: /etc/fstab
+        regexp: '^([^#].*\sswap\s.*)$'
+        replace: '# \1'
+      when: swap_state == "disabled"
+      
+    - name: Stop and disable firewalld
+      systemd:
+        name: firewalld
+        state: stopped
+        enabled: no
+      when: firewalld_state == "stopped"
+    
+    - name: Enable IP forwarding
+      sysctl:
+        name: net.ipv4.ip_forward
+        value: '1'
+        state: present
+        sysctl_set: yes
+        reload: yes
+      
+    - name: Enable bridge-nf-call-iptables
+      sysctl:
+        name: net.bridge.bridge-nf-call-iptables
+        value: '1'
+        state: present
+        sysctl_set: yes
+        reload: yes
+    
+    - name: Enable bridge-nf-call-ip6tables
+      sysctl:
+        name: net.bridge.bridge-nf-call-ip6tables
+        value: '1'
+        state: present
+        sysctl_set: yes
+        reload: yes
+      
+    - name: Load br_netfilter module
+      modprobe:
+        name: br_netfilter
+        state: present
+      
+    - name: Ensure br_netfilter loads on boot
+      lineinfile:
+        path: /etc/modules-load.d/br_netfilter.conf
+        line: br_netfilter
+        create: yes
+      
+    - name: Ensure overlay module loads on boot
+      lineinfile:
+        path: /etc/modules-load.d/overlay.conf
+        line: overlay
+        create: yes
+    
+    # ==================== CONTAINER RUNTIME (CONTAINERD) ====================
+    - name: Install container-tools
+      dnf:
+        name: container-tools
+        state: present
+      
+    - name: Add containerd repo
+      get_url:
+        url: https://download.docker.com/linux/fedora/docker-ce.repo
+        dest: /etc/yum.repos.d/docker-ce.repo
+    
+    - name: Install containerd
+      dnf:
+        name: containerd.io
+        state: present
+      
+    - name: Create containerd config directory
+      file:
+        path: /etc/containerd
+        state: directory
+      
+    - name: Generate default containerd config
+      shell: containerd config default > /etc/containerd/config.toml
+      args:
+        creates: /etc/containerd/config.toml
+      
+    - name: Configure containerd to use systemd cgroup driver
+      replace:
+        path: /etc/containerd/config.toml
+        regexp: 'SystemdCgroup = false'
+        replace: 'SystemdCgroup = true'
+    
+    - name: Start and enable containerd
+      systemd:
+        name: containerd
+        state: restarted
+        enabled: yes
+        daemon_reload: yes
+    
+    # ==================== KUBERNETES COMPONENTS ====================
+    - name: Add Kubernetes repo
+      copy:
+        dest: /etc/yum.repos.d/kubernetes.repo
+        content: |
+          [kubernetes]
+          name=Kubernetes
+          baseurl=https://pkgs.k8s.io/core:/stable:/v1.28/rpm/
+          enabled=1
+          gpgcheck=1
+          gpgkey=https://pkgs.k8s.io/core:/stable:/v1.28/rpm/repodata/repomd.xml.key
+          exclude=kubelet kubeadm kubectl cri-tools kubernetes-cni
+      
+    - name: Install Kubernetes components
+      dnf:
+        name:
+          - kubelet-{{ kubernetes_version }}
+          - kubeadm-{{ kubernetes_version }}
+          - kubectl-{{ kubernetes_version }}
+          - kubernetes-cni
+        state: present
+        disable_excludes: kubernetes
+      
+    - name: Enable and start kubelet
+      systemd:
+        name: kubelet
+        state: started
+        enabled: yes
+    
+    - name: Configure kubectl bash completion
+      lineinfile:
+        path: /etc/profile.d/kubectl_completion.sh
+        line: 'source <(kubectl completion bash)'
+        create: yes
+        mode: '0644'
+    
+    # ==================== INITIALIZE KUBERNETES CLUSTER ====================
+    - name: Initialize Kubernetes cluster with kubeadm
+      command: >
+        kubeadm init 
+        --pod-network-cidr={{ pod_network_cidr }} 
+        --kubernetes-version={{ kubernetes_version }}
+      args:
+        creates: /etc/kubernetes/admin.conf
+      register: kubeadm_init
+    
+    - name: Create .kube directory for the root user
+      file:
+        path: /root/.kube
+        state: directory
+        mode: '0700'
+      when: kubeadm_init.changed
+    
+    - name: Copy Kubernetes config for root user
+      copy:
+        src: /etc/kubernetes/admin.conf
+        dest: /root/.kube/config
+        remote_src: yes
+      when: kubeadm_init.changed
+    
+    - name: Get join command
+      command: kubeadm token create --print-join-command
+      register: join_command
+      when: kubeadm_init.changed
+    
+    - name: Set join command as fact
+      set_fact:
+        join_command: "{{ join_command.stdout }}"
+      when: kubeadm_init.changed
+    
+    - name: Display join command for worker nodes
+      debug:
+        var: join_command
+      when: kubeadm_init.changed
+    
+    # ==================== INSTALL CNI (FLANNEL) ====================
+    - name: Install Flannel CNI
+      command: kubectl apply -f https://github.com/flannel-io/flannel/releases/latest/download/kube-flannel.yml
+      when: kubeadm_init.changed
+      
+    # ==================== UNTAINT MASTER NODE (SINGLE NODE SETUP) ====================
+    - name: Untaint master node to allow pod scheduling
+      command: kubectl taint nodes --all node-role.kubernetes.io/control-plane-
+      ignore_errors: yes
+      when: kubeadm_init.changed
+    
+    # ==================== POST-INSTALLATION TASKS ====================
+    - name: Check cluster status
+      command: kubectl get nodes
+      register: kubectl_status
+      changed_when: false
+      ignore_errors: yes
+    
+    - name: Display cluster status
+      debug:
+        var: kubectl_status.stdout_lines
+      when: kubectl_status is not failed
