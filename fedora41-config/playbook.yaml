@@ -1,5 +1,6 @@
 ---
 # Fedora 41 Server Configuration Playbook
+# This playbook installs Golang, sqlc, Podman and configures networking
 
 - name: Configure Fedora 41 server
   hosts: fedora-server
@@ -14,17 +15,10 @@
       - "8.8.8.8"
       - "8.8.4.4"
     
+    # Software versions
+    golang_version: "1.23.0"       # Specify your Go version
+    
   tasks:
-    - name: Install python
-      command: dnf install python -y
-      register: install_status
-      changed_when: "'Installing' in install_status.stdout"
-
-    - name: Install dnf dependencies
-      command: dnf install python3-libdnf5 -y
-      register: install_status
-      changed_when: "'Installing' in install_status.stdout"
-
     # Update system packages
     - name: Update dnf cache
       dnf:
@@ -83,6 +77,69 @@
         name: NetworkManager
         state: restarted
       when: network_config.changed
+    
+    # Install Podman
+    - name: Install Podman
+      dnf:
+        name: podman
+        state: present
+    
+    # Install Go
+    - name: Download Go
+      get_url:
+        url: "https://golang.org/dl/go{{ golang_version }}.linux-amd64.tar.gz"
+        dest: "/tmp/go{{ golang_version }}.linux-amd64.tar.gz"
+        mode: 0644
+    
+    - name: Remove any existing Go installation
+      file:
+        path: /usr/local/go
+        state: absent
+    
+    - name: Extract Go
+      unarchive:
+        src: "/tmp/go{{ golang_version }}.linux-amd64.tar.gz"
+        dest: /usr/local
+        remote_src: yes
+    
+    - name: Set up Go environment variables
+      copy:
+        dest: /etc/profile.d/go.sh
+        content: |
+          export GOPATH=$HOME/go
+          export PATH=$PATH:/usr/local/go/bin:$GOPATH/bin
+        mode: 0644
+    
+    - name: Create GOPATH directory
+      file:
+        path: "/home/{{ ansible_user }}/go"
+        state: directory
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+        mode: 0755
+      become_user: "{{ ansible_user }}"
+    
+    # Install sqlc
+    - name: Install git (required for go get)
+      dnf:
+        name: git
+        state: present
+    
+    - name: Install gcc and other build essentials
+      dnf:
+        name:
+          - gcc
+          - gcc-c++
+          - make
+        state: present
+    
+    - name: Install sqlc via go install
+      shell: |
+        source /etc/profile.d/go.sh
+        go install github.com/sqlc-dev/sqlc/cmd/sqlc@latest
+      args:
+        executable: /bin/bash
+      become_user: "{{ ansible_user }}"
     
     # Final system restart
     - name: Restart system to apply all changes
