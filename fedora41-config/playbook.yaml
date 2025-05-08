@@ -48,6 +48,11 @@
         state: present
     
     # Configure static IP
+    - name: Check if network configuration file exists
+      stat:
+        path: /etc/NetworkManager/system-connections/{{ network_interface }}.nmconnection
+      register: network_file
+
     - name: Configure network connection with static IP
       copy:
         dest: /etc/NetworkManager/system-connections/{{ network_interface }}.nmconnection
@@ -70,6 +75,7 @@
           [ipv6]
           method=auto
         mode: 0600
+      when: not network_file.stat.exists
       register: network_config
     
     - name: Restart NetworkManager service
