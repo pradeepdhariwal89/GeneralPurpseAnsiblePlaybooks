@@ -1,2 +1,2 @@
-[fedora-server]
-fedora-base ansible_user=admin
+[fedora-master]
+fedora-base ansible_user=kadmin

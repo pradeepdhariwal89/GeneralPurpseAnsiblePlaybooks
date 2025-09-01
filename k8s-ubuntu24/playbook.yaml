@@ -7,16 +7,17 @@
   hosts: k8s_master
   become: true
   vars:
-    kubernetes_version: "1.28.0"
-    pod_network_cidr: "10.244.0.0/16"
+    kubernetes_version: "1.31.0"
+    pod_network_cidr: "10.10.0.0/16"
     selinux_state: permissive
-    firewalld_state: stopped
+    firewall_state: stopped
     swap_state: disabled
+    untaint_master: true
     
   tasks:
     # ==================== PREREQUISITES ====================
     - name: Update all packages
-      dnf:
+      apt:
         name: "*"
         state: latest
         update_cache: yes
@@ -24,25 +25,19 @@
     - name: Install required packages
       dnf:
         name:
-          - iproute-tc
           - curl
+          - apt-transport-https
+          - ca-certificates
+          - gnupg
+          - lsb-release
           - wget
           - git
           - vim
           - bash-completion
           - policycoreutils-python-utils
-          - container-selinux
-          - conntrack-tools
-          - socat
         state: present
     
     # ==================== SYSTEM CONFIGURATION ====================
-    - name: Set SELinux to {{ selinux_state }}
-      selinux:
-        policy: targeted
-        state: "{{ selinux_state }}"
-      register: selinux_change
-      
     - name: Disable swap
       command: swapoff -a
       when: swap_state == "disabled"
@@ -54,12 +49,9 @@
         replace: '# \1'
       when: swap_state == "disabled"
       
-    - name: Stop and disable firewalld
-      systemd:
-        name: firewalld
-        state: stopped
-        enabled: no
-      when: firewalld_state == "stopped"
+    - name: Stop and disable firewall
+      command: ufw disable
+      when: firewall_state == "stopped"
     
     - name: Enable IP forwarding
       sysctl:
@@ -92,68 +84,55 @@
       
     - name: Ensure br_netfilter loads on boot
       lineinfile:
-        path: /etc/modules-load.d/br_netfilter.conf
+        path: /etc/modules-load.d/k8s.conf
         line: br_netfilter
         create: yes
       
     - name: Ensure overlay module loads on boot
       lineinfile:
-        path: /etc/modules-load.d/overlay.conf
+        path: /etc/modules-load.d/k8s.conf
         line: overlay
         create: yes
     
     # ==================== CONTAINER RUNTIME (CONTAINERD) ====================
     - name: Install container-tools
-      dnf:
-        name: container-tools
+      apt:
+        name: containerd
         state: present
-      
-    - name: Add containerd repo
-      get_url:
-        url: https://download.docker.com/linux/fedora/docker-ce.repo
-        dest: /etc/yum.repos.d/docker-ce.repo
-    
-    - name: Install containerd
-      dnf:
-        name: containerd.io
-        state: present
-      
+
     - name: Create containerd config directory
       file:
         path: /etc/containerd
         state: directory
-      
+
     - name: Generate default containerd config
       shell: containerd config default > /etc/containerd/config.toml
       args:
         creates: /etc/containerd/config.toml
-      
+
     - name: Configure containerd to use systemd cgroup driver
       replace:
         path: /etc/containerd/config.toml
         regexp: 'SystemdCgroup = false'
         replace: 'SystemdCgroup = true'
-    
+
     - name: Start and enable containerd
       systemd:
         name: containerd
         state: restarted
         enabled: yes
         daemon_reload: yes
-    
+
     # ==================== KUBERNETES COMPONENTS ====================
     - name: Add Kubernetes repo
-      copy:
-        dest: /etc/yum.repos.d/kubernetes.repo
-        content: |
-          [kubernetes]
-          name=Kubernetes
-          baseurl=https://pkgs.k8s.io/core:/stable:/v1.28/rpm/
-          enabled=1
-          gpgcheck=1
-          gpgkey=https://pkgs.k8s.io/core:/stable:/v1.28/rpm/repodata/repomd.xml.key
-          exclude=kubelet kubeadm kubectl cri-tools kubernetes-cni
-      
+      shell: |
+        curl -fsSL https://pkgs.k8s.io/core:/stable:/v1.31/deb/Release.key | sudo gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+        echo "deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v1.31/deb/ /" | sudo tee /etc/apt/sources.list.d/kubernetes.list
+
+    - name: Update all packages
+      apt:
+        update_cache: yes
+
     - name: Install Kubernetes components
       dnf:
         name:
@@ -169,13 +148,6 @@
         name: kubelet
         state: started
         enabled: yes
-    
-    - name: Configure kubectl bash completion
-      lineinfile:
-        path: /etc/profile.d/kubectl_completion.sh
-        line: 'source <(kubectl completion bash)'
-        create: yes
-        mode: '0644'
     
     # ==================== INITIALIZE KUBERNETES CLUSTER ====================
     - name: Initialize Kubernetes cluster with kubeadm
@@ -217,15 +189,15 @@
       when: kubeadm_init.changed
     
     # ==================== INSTALL CNI (FLANNEL) ====================
-    - name: Install Flannel CNI
-      command: kubectl apply -f https://github.com/flannel-io/flannel/releases/latest/download/kube-flannel.yml
+    - name: Install Calico CNI
+      command: kubectl apply -f https://docs.projectcalico.org/manifests/calico.yaml
       when: kubeadm_init.changed
       
     # ==================== UNTAINT MASTER NODE (SINGLE NODE SETUP) ====================
     - name: Untaint master node to allow pod scheduling
       command: kubectl taint nodes --all node-role.kubernetes.io/control-plane-
       ignore_errors: yes
-      when: kubeadm_init.changed
+      when: kubeadm_init.changed and untaint_master
     
     # ==================== POST-INSTALLATION TASKS ====================
     - name: Check cluster status
